@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import useSWR from "swr";
-import { fetcher } from "@/lib/api";
-import { swrRetryConfig } from "@/hooks/useRetry";
+import { endpoint } from "@/lib/api";
+import { quoteSchema } from "@/lib/schemas";
+
+const fetcher = endpoint(quoteSchema);
 import type { Quote, QuoteRequest, QuoteErrorType } from "@/lib/types";
 
 function quoteKey(params: QuoteRequest | null): string | null {

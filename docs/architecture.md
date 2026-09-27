@@ -55,6 +55,32 @@ The WebSocket is purely additive on top of SWR's data — it is never the sole
 source of truth. If the socket never connects, the REST snapshot (optionally
 polling) still renders correctly; the feed just won't say `isLive`.
 
+## API client (`apiFetch`)
+
+`src/lib/api.ts` is the only path to the relay. Options: `{ signal, retry, idempotencyKey, validator }`.
+
+- **Timeout & cancellation:** each attempt has a 10 s timeout. A caller
+  `signal` is merged with the timeout controller via manual listeners (no
+  reliance on `AbortSignal.any`) and listeners are removed afterwards. Caller
+  aborts reject with `AbortError`; only the internal timeout yields `TimeoutError`.
+- **Retries:** GETs retry network errors, timeouts and 5xx with exponential
+  backoff (`DEFAULT_RETRIES`, opt out with `retry: false`). SWR fetchers created
+  by `endpoint()` opt out because SWR's global policy owns retries. POSTs retry
+  only when an `Idempotency-Key` is present, and reuse the same key.
+- **Idempotency:** money-moving POSTs (`createIntent`, `submitIntent`,
+  `acceptIntent`, `registerSolver`, `submitSolverRegistration`) send an
+  `Idempotency-Key` (`crypto.randomUUID()`), overridable per call. *Assumption:*
+  the relay de-duplicates requests with the same key and returns the original
+  response; until it does, a retried POST may be processed twice, so retries are
+  limited to network errors/timeouts/5xx.
+- **Correlation:** every request carries an `X-Request-Id`; the id is attached
+  to `ApiError`/`TimeoutError`/`ClientError` and shown (copyable) by `ErrorState`.
+- **Error bodies:** truncated to `MAX_ERROR_BODY` characters and only ever
+  rendered as text. JSON bodies expose `code`/`message` on `ApiError`;
+  `Retry-After` is parsed into `retryAfterMs`.
+
+See [data-fetching.md](./data-fetching.md) for the SWR policy.
+
 ## Zustand store boundaries
 
 Global client state is split into two small, single-purpose

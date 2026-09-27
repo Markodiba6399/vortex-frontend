@@ -1,5 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { apiFetch, ApiError, TimeoutError } from "./api";
+import {
+  apiFetch,
+  ApiError,
+  DEFAULT_RETRIES,
+  endpoint,
+  MAX_ERROR_BODY,
+  parseRetryAfter,
+  TimeoutError,
+  toClientError,
+} from "./api";
+import { ValidationError, feedItemListSchema, feedItemSchema } from "./schemas";
+import { feedItem, jsonResponse } from "@/test/fixtures/api";
 
 // Note: API_URL validation happens at module load time.
 // Unit tests verify the apiFetch function behavior; integration tests
@@ -102,7 +113,7 @@ describe("apiFetch", () => {
         }),
     );
 
-    const promise = apiFetch("/slow");
+    const promise = apiFetch("/slow", undefined, { retry: false });
     vi.advanceTimersByTime(10_000);
 
     await expect(promise).rejects.toThrow(TimeoutError);
@@ -125,7 +136,7 @@ describe("apiFetch", () => {
         }),
     );
 
-    const promise = apiFetch("/slow");
+    const promise = apiFetch("/slow", undefined, { retry: false });
     vi.advanceTimersByTime(10_000);
 
     await expect(promise).rejects.toMatchObject({
@@ -133,5 +144,100 @@ describe("apiFetch", () => {
       message: "Request timed out. Please try again.",
     });
     vi.useRealTimers();
+  });
+});
+
+describe("apiFetch hardening", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  const mockFetch = () => fetch as ReturnType<typeof vi.fn>;
+  const headersOf = (call: number) => mockFetch().mock.calls[call]![1].headers as Record<string, string>;
+
+  it("sends X-Request-Id and exposes it on ApiError with parsed JSON code/message", async () => {
+    mockFetch().mockResolvedValue(jsonResponse({ code: "E_BAD", message: "Bad input" }, 400));
+    const err = await apiFetch("/x").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ code: "E_BAD", message: "Bad input", status: 400 });
+    expect((err as ApiError).requestId).toBe(headersOf(0)["X-Request-Id"]);
+  });
+
+  it("caps non-JSON error bodies", async () => {
+    mockFetch().mockResolvedValue(jsonResponse("<b>x</b>".repeat(1000), 400));
+    const err = (await apiFetch("/x").catch((e: unknown) => e)) as ApiError;
+    expect(err.message.length).toBeLessThanOrEqual(MAX_ERROR_BODY);
+  });
+
+  it.each([
+    ["GET 5xx retries", undefined, {}, 503, 1 + DEFAULT_RETRIES],
+    ["GET 4xx does not retry", undefined, {}, 404, 1],
+    ["GET opt-out", undefined, { retry: false as const }, 503, 1],
+    ["POST without key does not retry", { method: "POST" }, {}, 503, 1],
+    ["POST with key retries", { method: "POST" }, { idempotencyKey: "k1" }, 503, 1 + DEFAULT_RETRIES],
+  ])("%s", async (_name, init, opts, status, calls) => {
+    vi.useFakeTimers();
+    mockFetch().mockResolvedValue(jsonResponse({}, status));
+    const p = apiFetch("/x", init, opts).catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    expect(await p).toBeInstanceOf(ApiError);
+    expect(mockFetch()).toHaveBeenCalledTimes(calls);
+  });
+
+  it("reuses the Idempotency-Key across retries", async () => {
+    mockFetch().mockRejectedValueOnce(new TypeError("network")).mockResolvedValue(jsonResponse({ ok: 1 }));
+    vi.useFakeTimers();
+    const p = apiFetch("/x", { method: "POST" }, { idempotencyKey: "k1" });
+    await vi.runAllTimersAsync();
+    await expect(p).resolves.toEqual({ ok: 1 });
+    expect(headersOf(0)["Idempotency-Key"]).toBe("k1");
+    expect(headersOf(1)["Idempotency-Key"]).toBe("k1");
+  });
+
+  it("caller abort surfaces as AbortError, not TimeoutError", async () => {
+    mockFetch().mockImplementation(
+      (_u: string, init: RequestInit) =>
+        new Promise((_r, reject) =>
+          init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))),
+        ),
+    );
+    const controller = new AbortController();
+    const p = apiFetch("/x", undefined, { signal: controller.signal });
+    controller.abort();
+    await expect(p).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("throws ValidationError with path via a throwing validator", async () => {
+    mockFetch().mockResolvedValue(jsonResponse({ ...feedItem, createdAt: "nope" }));
+    await expect(apiFetch("/x", undefined, { validator: feedItemSchema })).rejects.toMatchObject({
+      name: "ValidationError",
+      path: "$.createdAt",
+    });
+  });
+
+  it("endpoint() fetchers validate and drop invalid list items", async () => {
+    mockFetch().mockResolvedValue(jsonResponse([feedItem, { id: 1 }]));
+    await expect(endpoint(feedItemListSchema)("/intents")).resolves.toEqual([feedItem]);
+  });
+});
+
+describe("toClientError / parseRetryAfter", () => {
+  it("classifies errors", () => {
+    expect(toClientError(new TimeoutError()).kind).toBe("timeout");
+    expect(toClientError(new ApiError("x", 500)).kind).toBe("http");
+    expect(toClientError(new ValidationError("x")).kind).toBe("validation");
+    expect(toClientError(new TypeError("Failed to fetch")).kind).toBe("network");
+  });
+
+  it("parses seconds and HTTP dates", () => {
+    expect(parseRetryAfter("3")).toBe(3000);
+    expect(parseRetryAfter(new Date(10_000).toUTCString(), 4_000)).toBe(6000);
+    expect(parseRetryAfter("garbage")).toBeUndefined();
+    expect(parseRetryAfter(null)).toBeUndefined();
   });
 });

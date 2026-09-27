@@ -3,6 +3,7 @@ import "./globals.css";
 import { WalletHydrator } from "@/components/WalletHydrator";
 import { ToastViewport } from "@/components/ToastViewport";
 import { IntentStatusWatcher } from "@/components/IntentStatusWatcher";
+import { AppSWRProvider } from "@/components/AppSWRProvider";
 import { I18nProvider } from "@/lib/i18n/I18nProvider";
 import { DEFAULT_LOCALE } from "@/lib/i18n";
 
@@ -104,13 +105,15 @@ export default function RootLayout({
           Skip to main content
         </a>
         <I18nProvider locale={DEFAULT_LOCALE}>
-          <GlobalErrorCapture />
-          <WalletHydrator />
-          <IntentStatusWatcher />
-          {children}
-          <CommandPalette />
-          <ToastViewport />
-          <ConnectivityBanner />
+          <AppSWRProvider>
+            <GlobalErrorCapture />
+            <WalletHydrator />
+            <IntentStatusWatcher />
+            {children}
+            <CommandPalette />
+            <ToastViewport />
+            <ConnectivityBanner />
+          </AppSWRProvider>
         </I18nProvider>
       </body>
     </html>

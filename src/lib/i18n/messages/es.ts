@@ -151,4 +151,16 @@ export const es = {
   // solve/[address] — historial de llenados vacío
   "solverDetail.fillHistory.empty.title": "Sin llenados aún",
   "solverDetail.fillHistory.empty.message": "Una vez que este solver empiece a aceptar y llenar intenciones, su historial aparecerá aquí.",
+  // Estados compartidos de error / paginación
+  "error.title": "Algo salió mal",
+  "error.network": "Error de red. Revisa tu conexión e inténtalo de nuevo.",
+  "error.timeout": "La solicitud tardó demasiado. Inténtalo de nuevo.",
+  "error.http": "El servidor devolvió un error. Inténtalo de nuevo.",
+  "error.validation": "Recibimos una respuesta inesperada del servidor.",
+  "error.retry": "Reintentar",
+  "error.requestId": "ID de solicitud: {id}",
+  "list.loadMore": "Cargar más",
+  "list.loadingMore": "Cargando más…",
+  "list.end": "Fin de los resultados",
+  "list.loadMoreError": "No se pudieron cargar más resultados.",
 } as const;

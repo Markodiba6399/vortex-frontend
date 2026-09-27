@@ -9,7 +9,8 @@ import { Footer } from "@/components/Footer";
 import { IntentStatusBadge } from "@/components/IntentStatusBadge";
 import { SkeletonCard } from "@/components/Skeleton";
 import { EmptyState } from "@/components/EmptyState";
-import { useLiveIntents } from "@/hooks/useLiveIntents";
+import { ErrorState } from "@/components/ErrorState";
+import { useLiveIntentsPage } from "@/hooks/useLiveIntents";
 import { useTranslation } from "@/lib/i18n/I18nProvider";
 import { timeAgo } from "@/lib/time";
 import { CHAINS } from "@/lib/marketData";
@@ -41,7 +42,6 @@ function readSort(value: string | null): SortOption {
 
 export default function ExplorePageClient() {
   const { t } = useTranslation();
-  const { intents, isLoading, error, isLive } = useLiveIntents();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -49,6 +49,19 @@ export default function ExplorePageClient() {
   const statusFilter = readStatus(searchParams.get("status"));
   const chainFilter = readChain(searchParams.get("chain"));
   const sort = readSort(searchParams.get("sort"));
+
+  // URL-driven filters reset the cursor; client-side filtering below still
+  // applies so the unpaginated compatibility shim behaves identically.
+  const {
+    intents,
+    isLoading,
+    error,
+    isLive,
+    hasMore = false,
+    isLoadingMore = false,
+    loadMore,
+    retry,
+  } = useLiveIntentsPage({ filters: { status: statusFilter, chain: chainFilter }, sort });
 
   const updateQuery = (updates: Record<string, string>) => {
     const next = new URLSearchParams(searchParams.toString());
@@ -120,6 +133,13 @@ export default function ExplorePageClient() {
   useEffect(() => {
     rowVirtualizer.scrollToIndex(0);
   }, [statusFilter, chainFilter, sort, rowVirtualizer]);
+
+  // Load the next page once the virtualizer renders near the end of the list.
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const lastVirtualIndex = virtualItems[virtualItems.length - 1]?.index ?? -1;
+  useEffect(() => {
+    if (hasMore && !isLoadingMore && !error && lastVirtualIndex >= filtered.length - 5) loadMore?.();
+  }, [lastVirtualIndex, filtered.length, hasMore, isLoadingMore, error, loadMore]);
 
   const handleExportCsv = () => {
     downloadCsv("vortex-intents.csv", buildIntentsCsv(filtered));
@@ -232,12 +252,9 @@ export default function ExplorePageClient() {
         {/* Results */}
         {isLoading && intents.length === 0 ? (
           <IntentListSkeleton count={4} />
-        ) : error ? (
-          <div className="card p-8 text-center">
-            <p className="text-sm font-medium text-vx-text mb-1">{t("explore.error.title")}</p>
-            <p className="text-xs text-vx-muted max-w-xs mx-auto">{t("explore.error.message")}</p>
-          </div>
-        ) : filtered.length === 0 ? (
+        ) : error && intents.length === 0 ? (
+          <ErrorState error={error} title={t("explore.error.title")} retry={retry} />
+        ) : filtered.length === 0 && !hasMore ? (
           <div className="card p-8 text-center">
             <p className="text-sm font-medium text-vx-text mb-1">{t("explore.empty.title")}</p>
             <p className="text-xs text-vx-muted max-w-xs mx-auto mb-4">{t("explore.empty.message")}</p>
@@ -292,6 +309,21 @@ export default function ExplorePageClient() {
                   </Link>
                 );
               })}
+            </div>
+            <div className="py-3 text-center text-xs text-vx-muted" aria-live="polite">
+              {error ? (
+                <button type="button" onClick={loadMore} className="underline focus:outline-none focus:ring-2 focus:ring-vx-sage rounded">
+                  {t("list.loadMoreError")} {t("error.retry")}
+                </button>
+              ) : isLoadingMore ? (
+                t("list.loadingMore")
+              ) : hasMore ? (
+                <button type="button" onClick={loadMore} className="underline focus:outline-none focus:ring-2 focus:ring-vx-sage rounded">
+                  {t("list.loadMore")}
+                </button>
+              ) : (
+                t("list.end")
+              )}
             </div>
           </div>
         )}

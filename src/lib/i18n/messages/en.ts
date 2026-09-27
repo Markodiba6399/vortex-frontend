@@ -193,4 +193,16 @@ export const en = {
   // solve/[address] — fill history empty
   "solverDetail.fillHistory.empty.title": "No fills yet",
   "solverDetail.fillHistory.empty.message": "Once this solver starts accepting and filling intents, their history will appear here.",
+  // Shared data-fetching error / pagination states
+  "error.title": "Something went wrong",
+  "error.network": "Network error. Check your connection and try again.",
+  "error.timeout": "The request timed out. Please try again.",
+  "error.http": "The server returned an error. Please try again.",
+  "error.validation": "We received an unexpected response from the server.",
+  "error.retry": "Try again",
+  "error.requestId": "Request ID: {id}",
+  "list.loadMore": "Load more",
+  "list.loadingMore": "Loading more…",
+  "list.end": "End of results",
+  "list.loadMoreError": "Couldn't load more results.",
 } as const;
