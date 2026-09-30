@@ -3,45 +3,55 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useVirtualizer } from "@tanstack/react-virtual";
 import { Nav } from "@/components/Nav";
 import { Footer } from "@/components/Footer";
 import { IntentStatusBadge } from "@/components/IntentStatusBadge";
-import { SkeletonCard } from "@/components/Skeleton";
+import { IntentListSkeleton, SkeletonCard } from "@/components/Skeleton";
+import { VirtualList } from "@/components/VirtualList";
+import { ExportDialog } from "@/components/ExportDialog";
+import { buildIntentsCsv, downloadCsv } from "@/lib/csv";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorState } from "@/components/ErrorState";
+import { HighlightedText, IntentSearchBox } from "@/components/IntentSearchBox";
+import { SavedViews } from "@/components/SavedViews";
 import { useLiveIntentsPage } from "@/hooks/useLiveIntents";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { buildIntentsCsv, downloadCsv } from "@/lib/csv";
+import { IntentListSkeleton, SkeletonCard } from "@/components/Skeleton";
 import { useTranslation } from "@/lib/i18n/I18nProvider";
 import { timeAgo } from "@/lib/time";
 import { CHAINS } from "@/lib/marketData";
 import { sanitizeDisplayText } from "@/lib/textSafety";
 import type { IntentStatus } from "@/lib/types";
+import {
+  STATUS_OPTIONS,
+  matchesSearch,
+  parseSearch,
+  readChain,
+  readQuery,
+  readRange,
+  readSort,
+  readStatus,
+  type RangeOption,
+  type SortOption,
+} from "@/lib/searchQuery";
+import type { ViewParams } from "@/store/views";
+import { viewParamsToSearch } from "@/store/views";
+import { useBufferedFeed, useFeedPause } from "@/hooks/useBufferedFeed";
+import { LiveFeedControls } from "@/components/LiveFeedControls";
 
-const STATUS_OPTIONS: Array<IntentStatus | "all"> = [
-  "all",
-  "pending",
-  "accepted",
-  "filled",
-  "failed",
-];
-const SORT_OPTIONS = ["newest", "oldest", "largest"] as const;
-type SortOption = (typeof SORT_OPTIONS)[number];
-const CHAIN_IDS = new Set(CHAINS.map((c) => c.id));
 const ROW_HEIGHT = 96;
 const ROW_GAP = 8;
-
-function readStatus(value: string | null): IntentStatus | "all" {
-  return value && (STATUS_OPTIONS as string[]).includes(value) ? (value as IntentStatus | "all") : "all";
-}
-function readChain(value: string | null): string {
-  return value && CHAIN_IDS.has(value) ? value : "all";
-}
-function readSort(value: string | null): SortOption {
-  return value && (SORT_OPTIONS as readonly string[]).includes(value) ? (value as SortOption) : "newest";
-}
+const SEARCH_DEBOUNCE_MS = 300;
+const VIEW_KEYS = ["status", "chain", "sort", "range", "q"] as const;
 
 export default function ExplorePageClient() {
   const { t } = useTranslation();
+  const { intents: liveIntents, isLoading, error, isLive } = useLiveIntents();
+  const pause = useFeedPause("explore");
+  const { visible: intents, pending, overflow, flush } = useBufferedFeed(liveIntents, {
+    isPaused: pause.isPaused,
+  });
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -49,6 +59,9 @@ export default function ExplorePageClient() {
   const statusFilter = readStatus(searchParams.get("status"));
   const chainFilter = readChain(searchParams.get("chain"));
   const sort = readSort(searchParams.get("sort"));
+  const range = readRange(searchParams.get("range"));
+  const urlQuery = readQuery(searchParams.get("q"));
+  const parsedSearch = useMemo(() => parseSearch(urlQuery), [urlQuery]);
 
   // URL-driven filters reset the cursor; client-side filtering below still
   // applies so the unpaginated compatibility shim behaves identically.
@@ -70,18 +83,72 @@ export default function ExplorePageClient() {
       else next.set(key, value);
     }
     const qs = next.toString();
-    router.replace(qs ? `${pathname}?${qs}` : pathname);
+    // `replace` (not push) so typing and filter tweaks don't spam history.
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
   };
+
+  // The input is local state; the URL `?q=` follows it after a debounce (#441).
+  const [search, setSearch] = useState(urlQuery);
+  const debouncedSearch = useDebouncedValue(search, SEARCH_DEBOUNCE_MS);
+  useEffect(() => {
+    const next = readQuery(debouncedSearch);
+    if (next !== urlQuery) updateQuery({ q: next });
+    // Only the debounced input drives URL writes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- updateQuery/urlQuery are read at call time on purpose
+  }, [debouncedSearch]);
+  // External URL changes (applied view, back/forward) flow back into the input.
+  useEffect(() => {
+    setSearch((prev) => (readQuery(prev) === urlQuery ? prev : urlQuery));
+  }, [urlQuery]);
+
+  const currentViewParams = useMemo(() => {
+    const params: ViewParams = {};
+    for (const key of VIEW_KEYS) {
+      const value = searchParams.get(key);
+      if (value) params[key] = value;
+    }
+    return params;
+  }, [searchParams]);
+  const applyView = (params: ViewParams) => {
+    router.replace(`${pathname}${viewParamsToSearch(params)}`, { scroll: false });
+  };
+
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search, 200);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // "/" focuses search from anywhere on the page (unless already typing).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (e.key !== "/" || target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      e.preventDefault();
+      searchRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const setStatusFilter = (value: IntentStatus | "all") => updateQuery({ status: value });
   const setChainFilter = (value: string) => updateQuery({ chain: value });
   const setSort = (value: SortOption) => updateQuery({ sort: value });
+  const handleStatusChange = (e: React.ChangeEvent<HTMLSelectElement>) =>
+    setStatusFilter(readStatus(e.target.value));
+  const handleChainChange = (e: React.ChangeEvent<HTMLSelectElement>) => setChainFilter(readChain(e.target.value));
+  const handleSortChange = (e: React.ChangeEvent<HTMLSelectElement>) => setSort(readSort(e.target.value));
+  const handleRangeChange = (e: React.ChangeEvent<HTMLSelectElement>) =>
+    updateQuery({ range: readRange(e.target.value) });
 
-  const isFiltered = statusFilter !== "all" || chainFilter !== "all";
+  const handleStatusChange = (e: React.ChangeEvent<HTMLSelectElement>) =>
+    setStatusFilter(readStatus(e.target.value));
+  const handleChainChange = (e: React.ChangeEvent<HTMLSelectElement>) => setChainFilter(readChain(e.target.value));
+  const handleSortChange = (e: React.ChangeEvent<HTMLSelectElement>) => setSort(readSort(e.target.value));
+
+  const isFiltered = statusFilter !== "all" || chainFilter !== "all" || range !== "all" || urlQuery !== "";
 
   const clearFilters = () => {
-    setStatusFilter("all");
-    setChainFilter("all");
+    setSearch("");
+    updateQuery({ status: "all", chain: "all", range: "all", q: "" });
   };
 
   const filtered = useMemo(() => {
@@ -93,16 +160,12 @@ export default function ExplorePageClient() {
     if (chainFilter !== "all") {
       result = result.filter((i) => i.srcChain === chainFilter);
     }
-    if (debouncedSearch.trim()) {
-      const q = debouncedSearch.toLowerCase().trim();
-      result = result.filter(
-        (i) =>
-          i.id.toLowerCase().includes(q) ||
-          i.srcToken.toLowerCase().includes(q) ||
-          i.dstToken.toLowerCase().includes(q) ||
-          i.srcChain.toLowerCase().includes(q) ||
-          i.solver.toLowerCase().includes(q),
-      );
+    if (range !== "all") {
+      const cutoff = Date.now() - Number(range) * 24 * 60 * 60 * 1000;
+      result = result.filter((i) => new Date(i.createdAt).getTime() >= cutoff);
+    }
+    if (urlQuery) {
+      result = result.filter((i) => matchesSearch(i, parsedSearch));
     }
 
     result = [...result].sort((a, b) => {
@@ -118,10 +181,11 @@ export default function ExplorePageClient() {
     });
 
     return result;
-  }, [intents, debouncedSearch, statusFilter, chainFilter, sort]);
+  }, [intents, urlQuery, parsedSearch, statusFilter, chainFilter, range, sort]);
 
   // Pagination is superseded by virtualization (#228): the full filtered/sorted
   // list is windowed instead of paginated, so `page` is intentionally not a URL param.
+  // Rows are measured (#444) so wrapped content at small widths is never clipped.
   const scrollRef = useRef<HTMLDivElement>(null);
   const rowVirtualizer = useVirtualizer({
     count: filtered.length,
@@ -132,7 +196,7 @@ export default function ExplorePageClient() {
 
   useEffect(() => {
     rowVirtualizer.scrollToIndex(0);
-  }, [statusFilter, chainFilter, sort, rowVirtualizer]);
+  }, [statusFilter, chainFilter, range, urlQuery, sort, rowVirtualizer]);
 
   // Load the next page once the virtualizer renders near the end of the list.
   const virtualItems = rowVirtualizer.getVirtualItems();
@@ -171,19 +235,11 @@ export default function ExplorePageClient() {
           </div>
         </div>
 
+        <SavedViews scope="explore" currentParams={currentViewParams} onApply={applyView} />
+
         {/* Filters and Search */}
         <div className="flex flex-wrap items-center gap-2 mb-6">
-          <label htmlFor="intent-search" className="sr-only">
-            Search intents
-          </label>
-          <input
-            id="intent-search"
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by id, token, chain or solver"
-            className="bg-vx-surface border border-vx-border rounded-lg px-3 py-2 text-sm text-vx-text placeholder-vx-dim/60 focus:outline-none focus:border-vx-sage/50 transition-colors"
-          />
+          <IntentSearchBox value={search} onChange={setSearch} />
 
           <label htmlFor="status-filter" className="sr-only">
             Filter by status
@@ -234,6 +290,22 @@ export default function ExplorePageClient() {
             <option value="largest">Largest amount</option>
           </select>
 
+          <label htmlFor="range-filter" className="sr-only">
+            {t("explore.range.label")}
+          </label>
+          <select
+            id="range-filter"
+            value={range}
+            onChange={handleRangeChange}
+            className="bg-vx-surface border border-vx-border rounded-lg px-3 py-2 text-sm text-vx-text"
+          >
+            {(["all", "7", "30", "90"] satisfies RangeOption[]).map((r) => (
+              <option key={r} value={r}>
+                {r === "all" ? t("explore.range.all") : t("explore.range.days", { days: r })}
+              </option>
+            ))}
+          </select>
+
           {isFiltered && (
             <button
               type="button"
@@ -244,12 +316,32 @@ export default function ExplorePageClient() {
             </button>
           )}
 
+          <ExportDialog items={filtered} filenameBase="vortex-intents" />
+
+          <LiveFeedControls
+            userPaused={pause.userPaused}
+            onToggle={pause.toggle}
+            pending={pending}
+            overflow={overflow}
+            onFlush={() => {
+              flush();
+              pause.containerRef.current?.focus();
+            }}
+          />
+
           <span className="text-xs text-vx-muted ml-auto" aria-live="polite" aria-atomic="true">
             {filtered.length} intent{filtered.length === 1 ? "" : "s"}
           </span>
         </div>
 
+        {urlQuery && (
+          <p role="note" className="text-xs text-vx-muted mb-3">
+            {t("explore.search.loadedOnly")}
+          </p>
+        )}
+
         {/* Results */}
+        <div className="focus:outline-none" {...pause.containerProps}>
         {isLoading && intents.length === 0 ? (
           <IntentListSkeleton count={4} />
         ) : error && intents.length === 0 ? (
@@ -269,64 +361,38 @@ export default function ExplorePageClient() {
             )}
           </div>
         ) : (
-          <div
-            ref={scrollRef}
-            className="max-h-[70vh] overflow-y-auto"
-            role="list"
-            aria-label={`${filtered.length} intent${filtered.length === 1 ? "" : "s"}`}
-          >
-            <div style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
-              {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                const item = filtered[virtualRow.index];
-                return (
-                  <Link
-                    key={item.id}
-                    href={`/explore/${item.id}`}
-                    role="listitem"
-                    style={{
-                      position: "absolute",
-                      top: 0,
-                      left: 0,
-                      width: "100%",
-                      height: virtualRow.size - ROW_GAP,
-                      transform: `translateY(${virtualRow.start}px)`,
-                    }}
-                    className="flex items-center gap-4 p-4 bg-vx-surface/40 rounded-lg border border-vx-line
-                               hover:border-vx-border transition-colors"
-                  >
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium text-vx-text truncate">
-                        {item.srcAmount} {item.srcToken} → {item.dstToken}
-                      </div>
-                      <div className="text-xs text-vx-muted capitalize">
-                        {item.srcChain} · via {item.solver}
-                      </div>
-                    </div>
-                    <IntentStatusBadge status={item.status} />
-                    <span className="text-xs text-vx-muted num flex-shrink-0 w-16 text-right">
-                      {timeAgo(item.createdAt)}
-                    </span>
-                  </Link>
-                );
-              })}
-            </div>
-            <div className="py-3 text-center text-xs text-vx-muted" aria-live="polite">
-              {error ? (
-                <button type="button" onClick={loadMore} className="underline focus:outline-none focus:ring-2 focus:ring-vx-sage rounded">
-                  {t("list.loadMoreError")} {t("error.retry")}
-                </button>
-              ) : isLoadingMore ? (
-                t("list.loadingMore")
-              ) : hasMore ? (
-                <button type="button" onClick={loadMore} className="underline focus:outline-none focus:ring-2 focus:ring-vx-sage rounded">
-                  {t("list.loadMore")}
-                </button>
-              ) : (
-                t("list.end")
-              )}
-            </div>
-          </div>
+          <VirtualList
+            items={filtered}
+            getKey={getIntentKey}
+            estimateSize={ROW_ESTIMATE}
+            label={t("explore.list.label", { count: String(filtered.length) })}
+            restoreKey={restoreKey}
+            resetKey={resetKey}
+            onActivate={(item) => router.push(`/explore/${item.id}`)}
+            renderRow={(item) => (
+              <Link
+                href={`/explore/${item.id}`}
+                tabIndex={-1}
+                className="flex flex-wrap items-center gap-x-4 gap-y-2 p-4 bg-vx-surface/40 rounded-lg border border-vx-line
+                            hover:border-vx-border transition-colors"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-vx-text break-words">
+                    {item.srcAmount} {item.srcToken} → {item.dstToken}
+                  </div>
+                  <div className="text-xs text-vx-muted capitalize break-words">
+                    {item.srcChain} · via {sanitizeDisplayText(item.solver)}
+                  </div>
+                </div>
+                <IntentStatusBadge status={item.status} />
+                <span className="text-xs text-vx-muted num flex-shrink-0 w-16 text-right">
+                  {timeAgo(item.createdAt)}
+                </span>
+              </Link>
+            )}
+          />
         )}
+        </div>
       </main>
 
       <Footer />

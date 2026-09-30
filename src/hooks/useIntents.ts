@@ -13,10 +13,10 @@ import type { FeedItem } from "@/lib/types";
 // interval) so rapid re-mounts share one in-flight request without hitting
 // the relay repeatedly.
 export function useIntents() {
-  const { data, error, isLoading } = useSWR<FeedItem[]>("/intents", fetcher, {
+  const { data, error, isLoading, mutate } = useSWR<FeedItem[]>("/intents", fetcher, {
     refreshInterval: 0,
     dedupingInterval: 8_000,
   });
 
-  return { intents: data ?? [], isLoading, error };
+  return { intents: data ?? [], isLoading, error, mutate };
 }

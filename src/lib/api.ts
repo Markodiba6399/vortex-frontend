@@ -21,8 +21,13 @@ export const MAX_ERROR_BODY = 2_000;
 export const DEFAULT_RETRIES = 2;
 const RETRY_BASE_MS = 300;
 
-// Validate API_URL at module load time for supply-chain defense
-function validateApiUrl(urlString: string): string {
+/**
+ * Validate the API base URL at module load time (supply-chain defense):
+ * https:// is required in production, http:// is allowed otherwise, anything
+ * else throws. Trailing slashes are stripped so `${API_URL}${path}` never
+ * produces `//`; a path prefix (e.g. `https://host/api`) is kept.
+ */
+export function validateApiUrl(urlString: string): string {
   try {
     const url = new URL(urlString);
 
@@ -40,7 +45,7 @@ function validateApiUrl(urlString: string): string {
       );
     }
 
-    return urlString;
+    return urlString.replace(/\/+$/, "");
   } catch (err) {
     if (err instanceof Error && err.message.includes("API_URL must")) {
       throw err;
